@@ -287,6 +287,56 @@ public class TestRewriteTablePathsAction extends TestBase {
   }
 
   @TestTemplate
+  void rewritePathWithEquivalentFileUriSpellings() throws Exception {
+    // Issue 18872: a JDBC catalog warehouse supplied as file:///... stores
+    // TableMetadata.location with that spelling, while Hadoop FileIO serializes data and
+    // metadata file paths as file:/.... RFC 8089 Appendix B treats those two forms as
+    // equivalent local file URIs, so rewrite_table_path must accept a file:/ source prefix
+    // against a file:/// table location.
+    String location = newTableDir.toUri().toString();
+    assertThat(location).startsWith("file:///");
+
+    Table sourceTable = createTableWithSnapshots(location, 2);
+    assertThat(sourceTable.location()).startsWith("file:///");
+
+    String dataFilePath =
+        SnapshotChanges.builderFor(sourceTable)
+            .build()
+            .addedDataFiles()
+            .iterator()
+            .next()
+            .location();
+    assertThat(dataFilePath).startsWith("file:/").doesNotStartWith("file:///");
+
+    String sourcePrefix = sourceTable.location().replace("file:///", "file:/");
+    String targetTableLocation = targetTableLocation();
+
+    RewriteTablePath.Result result =
+        actions()
+            .rewriteTablePath(sourceTable)
+            .rewriteLocationPrefix(sourcePrefix, targetTableLocation)
+            .execute();
+
+    copyTableFiles(result);
+
+    List<String> rewrittenDataFiles =
+        spark
+            .read()
+            .format("iceberg")
+            .load(targetTableLocation + "#files")
+            .select("file_path")
+            .as(Encoders.STRING())
+            .collectAsList();
+    assertThat(rewrittenDataFiles)
+        .isNotEmpty()
+        .allMatch(item -> item.startsWith(targetTableLocation));
+
+    List<Object[]> actual = rows(targetTableLocation);
+    List<Object[]> expected = rows(sourceTable.location());
+    assertEquals("Rows should match after copy", expected, actual);
+  }
+
+  @TestTemplate
   public void testSameLocations() {
     assertThatThrownBy(
             () ->

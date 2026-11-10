@@ -293,7 +293,7 @@ public class RewriteTablePathUtil {
     manifestFiles.forEach(
         mf ->
             Preconditions.checkArgument(
-                mf.path().startsWith(sourcePrefix),
+                startsWithPrefix(mf.path(), sourcePrefix),
                 "Encountered manifest file %s not under the source prefix %s",
                 mf.path(),
                 sourcePrefix));
@@ -472,7 +472,7 @@ public class RewriteTablePathUtil {
     DataFile dataFile = entry.file();
     String sourceDataFilePath = dataFile.location();
     Preconditions.checkArgument(
-        sourceDataFilePath.startsWith(sourcePrefix),
+        startsWithPrefix(sourceDataFilePath, sourcePrefix),
         "Encountered data file %s not under the source prefix %s",
         sourceDataFilePath,
         sourcePrefix);
@@ -562,7 +562,7 @@ public class RewriteTablePathUtil {
       DeleteFile file, PartitionSpec spec, String sourcePrefix, String targetPrefix) {
     String path = file.location();
 
-    if (!path.startsWith(sourcePrefix)) {
+    if (!startsWithPrefix(path, sourcePrefix)) {
       throw new UnsupportedOperationException(
           "Expected delete file to be under the source prefix: "
               + sourcePrefix
@@ -587,7 +587,7 @@ public class RewriteTablePathUtil {
       long fileSizeInBytes) {
     String path = file.location();
     Preconditions.checkArgument(
-        path.startsWith(sourcePrefix),
+        startsWithPrefix(path, sourcePrefix),
         "Expected delete file %s to start with prefix: %s",
         path,
         sourcePrefix);
@@ -627,7 +627,7 @@ public class RewriteTablePathUtil {
     }
 
     String oldReferencedDataFile = deleteFile.referencedDataFile();
-    if (oldReferencedDataFile.startsWith(sourcePrefix)) {
+    if (startsWithPrefix(oldReferencedDataFile, sourcePrefix)) {
       return newPath(oldReferencedDataFile, sourcePrefix, targetPrefix);
     }
 
@@ -671,7 +671,7 @@ public class RewriteTablePathUtil {
       PositionDeleteReaderWriter posDeleteReaderWriter)
       throws IOException {
     String path = deleteFile.location();
-    if (!path.startsWith(sourcePrefix)) {
+    if (!startsWithPrefix(path, sourcePrefix)) {
       throw new UnsupportedOperationException(
           String.format("Expected delete file %s to start with prefix: %s", path, sourcePrefix));
     }
@@ -746,7 +746,7 @@ public class RewriteTablePathUtil {
         // Get the original properties and update the referenced data file path
         Map<String, String> properties = Maps.newHashMap(blobMetadata.properties());
         String referencedDataFile = properties.get("referenced-data-file");
-        if (referencedDataFile != null && referencedDataFile.startsWith(sourcePrefix)) {
+        if (referencedDataFile != null && startsWithPrefix(referencedDataFile, sourcePrefix)) {
           String newReferencedDataFile = newPath(referencedDataFile, sourcePrefix, targetPrefix);
           properties.put("referenced-data-file", newReferencedDataFile);
         }
@@ -783,7 +783,7 @@ public class RewriteTablePathUtil {
       Record record, String sourcePrefix, String targetPrefix) {
     PositionDelete delete = PositionDelete.create();
     String oldPath = (String) record.get(0);
-    if (!oldPath.startsWith(sourcePrefix)) {
+    if (!startsWithPrefix(oldPath, sourcePrefix)) {
       throw new UnsupportedOperationException(
           "Expected delete file to be under the source prefix: "
               + sourcePrefix
@@ -803,6 +803,9 @@ public class RewriteTablePathUtil {
    *
    * <p>Trailing separators are normalized: "/a" and "/a/" are treated as equivalent for both path
    * and sourcePrefix.
+   *
+   * <p>Local file URI spellings {@code file:/path} and {@code file:///path} are treated as
+   * equivalent, as specified by RFC 8089 Appendix B.
    *
    * @param path absolute path to rewrite
    * @param sourcePrefix source prefix that will be replaced
@@ -850,19 +853,35 @@ public class RewriteTablePathUtil {
    * and prefix. This allows flexibility when paths come from different sources that may or may not
    * include trailing separators.
    *
+   * <p>Local file URI spellings {@code file:/path} and {@code file:///path} are treated as
+   * equivalent, as specified by RFC 8089 Appendix B.
+   *
    * @param path absolute path to relativize
    * @param prefix prefix path to remove
    * @return relative path from prefix to path, or empty string if path equals prefix
    * @throws IllegalArgumentException if path is not under or equal to prefix
    */
   public static String relativize(String path, String prefix) {
-    String toRemove = maybeAppendFileSeparator(prefix);
-    String normalizedPath = maybeAppendFileSeparator(path);
+    String canonicalPath = normalizeLocalFileUri(path);
+    String canonicalPrefix = normalizeLocalFileUri(prefix);
+    String toRemove = maybeAppendFileSeparator(canonicalPrefix);
+    String normalizedPath = maybeAppendFileSeparator(canonicalPath);
     if (!normalizedPath.startsWith(toRemove)) {
       throw new IllegalArgumentException(
-          String.format("Path %s does not start with %s", normalizedPath, toRemove));
+          String.format(
+              "Path %s does not start with %s",
+              maybeAppendFileSeparator(path), maybeAppendFileSeparator(prefix)));
     }
-    return normalizedPath.equals(toRemove) ? "" : path.substring(toRemove.length());
+    return normalizedPath.equals(toRemove) ? "" : canonicalPath.substring(toRemove.length());
+  }
+
+  // RFC 8089 Appendix B: file:/path and file:///path are equivalent local file URIs.
+  private static String normalizeLocalFileUri(String path) {
+    return path.startsWith("file:///") ? "file:/" + path.substring("file:///".length()) : path;
+  }
+
+  private static boolean startsWithPrefix(String path, String prefix) {
+    return normalizeLocalFileUri(path).startsWith(normalizeLocalFileUri(prefix));
   }
 
   public static String maybeAppendFileSeparator(String path) {

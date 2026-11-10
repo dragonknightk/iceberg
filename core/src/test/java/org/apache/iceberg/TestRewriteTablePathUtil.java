@@ -546,6 +546,40 @@ public class TestRewriteTablePathUtil extends TestBase {
   }
 
   @TestTemplate
+  void rewriteDataManifestAcceptsFileUriSourcePrefix() throws IOException {
+    // Issue 18872 / RFC 8089 Appendix B: file:/path and file:///path are equivalent
+    // local file URIs. A Hadoop-style data path file:/tmp/warehouse/... must match a
+    // file:///tmp/warehouse source prefix in rewriteDataManifest, and the rewritten path
+    // keeps the file:/// target prefix spelling.
+    DataFile hadoopStyleFile =
+        DataFiles.builder(SPEC)
+            .copy(FILE_A)
+            .withPath("file:/tmp/warehouse/data/file.parquet")
+            .build();
+    ManifestFile manifest = writeManifest(1000L, hadoopStyleFile);
+
+    OutputFile output =
+        Files.localOutput(
+            FileFormat.AVRO.addExtension(
+                temp.resolve("junit" + System.nanoTime()).toFile().toString()));
+    RewriteTablePathUtil.RewriteResult<DataFile> result =
+        RewriteTablePathUtil.rewriteDataManifest(
+            manifest,
+            Set.of(1000L),
+            output,
+            table.io(),
+            formatVersion,
+            table.specs(),
+            "file:///tmp/warehouse",
+            "file:///tmp/target");
+
+    assertThat(result.copyPlan())
+        .containsExactly(
+            Pair.of(
+                "file:/tmp/warehouse/data/file.parquet", "file:///tmp/target/data/file.parquet"));
+  }
+
+  @TestTemplate
   public void testRewriteDataManifestRecordsRewrittenLength() throws IOException {
     table.newFastAppend().appendFile(FILE_A).appendFile(FILE_B).commit();
     ManifestFile manifest = table.currentSnapshot().allManifests(table.io()).get(0);
@@ -697,6 +731,63 @@ public class TestRewriteTablePathUtil extends TestBase {
     Record record = records.get(0);
     assertThat(record.get(0)).asString().startsWith(targetPrefix).endsWith("data/file.parquet");
     assertThat(record.get(1)).isEqualTo(0L);
+  }
+
+  @Test
+  void relativizeEquivalentFileUriSpellings() {
+    // Expected values come from issue 18872 and RFC 8089 Appendix B: "file:/path/to/file"
+    // and "file:///path/to/file" are equivalent local file URIs. rewrite_table_path must
+    // relativize a table location stored as file:///... against a file:/... prefix (and the
+    // reverse), which is how JDBC catalogs configured with a file:/// warehouse mix spellings.
+    assertThat(
+            RewriteTablePathUtil.relativize("file:///tmp/warehouse/db/t/", "file:/tmp/warehouse"))
+        .isEqualTo("db/t/");
+    assertThat(
+            RewriteTablePathUtil.relativize("file:/tmp/warehouse/db/t/", "file:///tmp/warehouse"))
+        .isEqualTo("db/t/");
+    assertThat(RewriteTablePathUtil.relativize("file:///tmp/warehouse", "file:/tmp/warehouse"))
+        .isEqualTo("");
+  }
+
+  @Test
+  void newPathEquivalentFileUriSpellings() {
+    // Issue 18872 / RFC 8089 Appendix B: the rewritten path keeps the target prefix spelling
+    // and appends the relative remainder after the equivalent source prefix.
+    assertThat(
+            RewriteTablePathUtil.newPath(
+                "file:///tmp/warehouse/db/t", "file:/tmp/warehouse", "file:/tmp/target"))
+        .isEqualTo("file:/tmp/target/db/t");
+    assertThat(
+            RewriteTablePathUtil.newPath(
+                "file:/tmp/warehouse/db/t", "file:///tmp/warehouse", "file:///tmp/target"))
+        .isEqualTo("file:///tmp/target/db/t");
+  }
+
+  @Test
+  void replacePathsEquivalentFileUriSpellings() {
+    // JDBC catalogs created with a file:/// warehouse store TableMetadata.location as
+    // file:///... while rewrite_table_path is typically given a file:/... source prefix
+    // taken from Hadoop-serialized file paths (issue 18872 / RFC 8089 Appendix B).
+    String location = "file:///tmp/warehouse/db/t";
+    TableMetadata metadata =
+        TableMetadata.newTableMetadata(
+            SCHEMA, PartitionSpec.unpartitioned(), location, ImmutableMap.of());
+
+    TableMetadata replaced =
+        RewriteTablePathUtil.replacePaths(metadata, "file:/tmp/warehouse", "file:/tmp/target");
+    assertThat(replaced.location()).isEqualTo("file:/tmp/target/db/t");
+  }
+
+  @Test
+  void relativizeDoesNotTreatRemoteFileUriAsLocal() {
+    // RFC 8089 Appendix B lists file://host.example.com/path as a non-local file URI, not
+    // an equivalent spelling of file:/host.example.com/path.
+    assertThatThrownBy(
+            () ->
+                RewriteTablePathUtil.relativize(
+                    "file://host.example.com/warehouse/db/t", "file:/host.example.com/warehouse"))
+        .isInstanceOf(IllegalArgumentException.class)
+        .hasMessageContaining("does not start with");
   }
 
   /** Returns one position delete record that carries row data, as 1.11 and earlier could write. */
